@@ -33,7 +33,7 @@ const UpdatePassword = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:5000/api/users/update-password', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/update-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, otp, password: newPassword }),
@@ -67,7 +67,7 @@ const UpdatePassword = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:5000/api/users/resend-otp', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/resend-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),

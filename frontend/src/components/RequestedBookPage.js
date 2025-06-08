@@ -90,7 +90,7 @@ const RequestedBooksPage = () => {
       }
 
       console.log("Sending fetch request to /api/issueRequests/all with:", { email: user.email });
-      const response = await fetch("http://localhost:5000/api/issueRequests/all", {
+      const response = await fetch("https://elibraryreadifyai.vercel.app/api/issueRequests/all", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -174,7 +174,7 @@ const RequestedBooksPage = () => {
         }
 
         console.log(`Sending update request to /api/issueRequests/update-status:`, requestBody);
-        const response = await fetch("http://localhost:5000/api/issueRequests/update-status", {
+        const response = await fetch("https://elibraryreadifyai.vercel.app/api/issueRequests/update-status", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

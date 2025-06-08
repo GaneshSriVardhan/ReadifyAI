@@ -67,7 +67,7 @@ const ReadPage = () => {
     setResponse('');
 
     try {
-      const proxyUrl = 'http://localhost:5000/api/ask';
+      const proxyUrl = 'https://elibraryreadifyai.vercel.app/api/ask';
       const payload = {
         bookTitle,
         question,

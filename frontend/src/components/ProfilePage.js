@@ -36,7 +36,7 @@ const ProfilePage = () => {
         setUserName(user.name);
 
         // Fetch additional user details from backend
-        const response = await fetch('http://localhost:5000/api/users/get-user-details', {
+        const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/get-user-details', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: user.email }),

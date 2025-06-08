@@ -20,7 +20,7 @@ const VerificationSend = () => {
 
     try {
 
-      const response = await fetch('http://localhost:5000/api/users/verify-otp', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/verify-otp', {
 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -54,7 +54,7 @@ const VerificationSend = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:5000/api/users/resend-otp', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/resend-otp', {
 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

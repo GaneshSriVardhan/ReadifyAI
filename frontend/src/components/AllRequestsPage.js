@@ -84,7 +84,7 @@ const AllRequestsPage = () => {
       }
 
       console.log("Sending fetch request to /api/issueRequests/user-requests with:", { email: user.email });
-      const response = await fetch("http://localhost:5000/api/issueRequests/user-requests", {
+      const response = await fetch("https://elibraryreadifyai.vercel.app/api/issueRequests/user-requests", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -144,7 +144,7 @@ const AllRequestsPage = () => {
       }
 
       console.log("Calculating fines for all issued books");
-      const response = await fetch("http://localhost:5000/api/issueRequests/calculate-fines", {
+      const response = await fetch("https://elibraryreadifyai.vercel.app/api/issueRequests/calculate-fines", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: user.email }),

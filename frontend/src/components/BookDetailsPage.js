@@ -124,7 +124,7 @@ const BookDetailsPage = () => {
 
   const handleAddToFavorites = async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/favorites/save-favorite', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/favorites/save-favorite', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

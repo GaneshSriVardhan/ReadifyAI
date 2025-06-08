@@ -54,7 +54,7 @@ const LibrarianIssuedBooksPage = () => {
     }
     setLoading(true);
     setError('');
-    fetch('http://localhost:5000/api/issueRequests/issued-users', {
+    fetch('https://elibraryreadifyai.vercel.app/api/issueRequests/issued-users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email }),
@@ -100,7 +100,7 @@ const LibrarianIssuedBooksPage = () => {
     }
     setLoading(true);
     setError('');
-    fetch('http://localhost:5000/api/issueRequests/issued-by-email', {
+    fetch('https://elibraryreadifyai.vercel.app/api/issueRequests/issued-by-email', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: adminEmail, userEmail }),
@@ -141,7 +141,7 @@ const LibrarianIssuedBooksPage = () => {
     setError('');
     try {
       console.log(`Sending return request for ID: ${requestId}`);
-      const response = await fetch('http://localhost:5000/api/issueRequests/update-status', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/issueRequests/update-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: requestId, status: 'Returned', email: adminEmail }),
@@ -174,7 +174,7 @@ const LibrarianIssuedBooksPage = () => {
     setError('');
     try {
       console.log('Calculating fines for all issued books');
-      const response = await fetch('http://localhost:5000/api/issueRequests/calculate-fines', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/issueRequests/calculate-fines', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: adminEmail }),

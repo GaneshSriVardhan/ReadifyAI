@@ -73,7 +73,7 @@ const AdminQueryPage = () => {
       setQueryResult(null);
       console.log('Sending question:', question);
       const response = await axios.post(
-        'http://localhost:5000/api/admin-query',
+        'https://elibraryreadifyai.vercel.app/api/admin-query',
         { question },
         { headers: { 'Content-Type': 'application/json' } }
       );

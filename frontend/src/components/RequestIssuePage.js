@@ -19,7 +19,7 @@ const RequestIssuePage = () => {
         if (user?.email) {
           setEmail(user.email);
           // Fetch user details to get booksCanRequest
-          const response = await fetch('http://localhost:5000/api/users/get-user-details', {
+          const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/get-user-details', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -71,7 +71,7 @@ const RequestIssuePage = () => {
     setError('');
     try {
       const user = JSON.parse(localStorage.getItem('user'));
-      const response = await fetch('http://localhost:5000/api/issueRequests/save-request', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/issueRequests/save-request', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -84,7 +84,7 @@ const FavoriteBooksPage = () => {
       }
 
       console.log("Sending fetch request to /api/favorites/user-favorites with:", { email: user.email });
-      const response = await fetch("http://localhost:5000/api/favorites/user-favorites", {
+      const response = await fetch("https://elibraryreadifyai.vercel.app/api/favorites/user-favorites", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -140,7 +140,7 @@ const FavoriteBooksPage = () => {
       }
 
       console.log("Sending remove request to /api/favorites/remove-favorite:", { bookId, email: user.email });
-      const response = await fetch("http://localhost:5000/api/favorites/remove-favorite", {
+      const response = await fetch("https://elibraryreadifyai.vercel.app/api/favorites/remove-favorite", {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",

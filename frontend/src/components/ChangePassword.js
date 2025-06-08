@@ -37,7 +37,7 @@ const ChangePassword = () => {
         throw new Error('No authenticated user found');
       }
 
-      const response = await fetch('http://localhost:5000/api/users/change-password', {
+      const response = await fetch('https://elibraryreadifyai.vercel.app/api/users/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: user.email, password: newPassword }),
