@@ -28,24 +28,7 @@ app.get('/', (req, res) => {
 
 // Hugging Face API settings
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/meta-llama/Llama-3.2-1B-Instruct';
-
-// Retry logic for rate limit and transient errors
-const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const response = await axios.post(url, data, { headers });
-      return response;
-    } catch (error) {
-      if ([429, 503].includes(error.response?.status) && i < retries - 1) {
-        console.log(`Error ${error.response?.status} at ${url}, retrying in ${delay * Math.pow(2, i)}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
-        continue;
-      }
-      throw error;
-    }
-  }
-};
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3';
 
 // Tool definition for book context
 const TOOLS = [{
@@ -99,22 +82,20 @@ app.post('/api/ask', async (req, res) => {
     }
 
     const bookContext = await fetchBookContext(bookTitle);
-    const systemPrompt = `You are a helpful assistant with access to book metadata. Use the provided context to answer the user's question about the book. Return only the answer, without explanations or extra text.
+    const systemPrompt = `You are a helpful assistant with tools. <|tool|>${JSON.stringify(TOOLS)}</tool|> Use the provided tool to gather information about the book before answering.`;
+    const prompt = `${systemPrompt}\nContext from tool: ${bookContext}\nUser question: ${question}`;
 
-Context: ${bookContext}
-
-User question: ${question}`;
-    const prompt = `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`;
-
-    const response = await retryRequest(
+    const response = await axios.post(
       HUGGINGFACE_API_URL,
       {
         inputs: prompt,
-        parameters: { max_new_tokens: 200, return_full_text: false, temperature: 0.3 }
+        parameters: { max_new_tokens: 500, return_full_text: false },
       },
       {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+        },
       }
     );
 
@@ -122,7 +103,7 @@ User question: ${question}`;
       return res.status(500).json({ error: 'No valid response from Hugging Face API' });
     }
 
-    res.json({ answer: response.data[0].generated_text.trim() });
+    res.json({ answer: response.data[0].generated_text });
   } catch (error) {
     console.error('Proxy error:', {
       message: error.message,
@@ -131,9 +112,7 @@ User question: ${question}`;
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.status === 404
-      ? 'Hugging Face model not found. Please verify the model ID.'
-      : error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
+    const errorMessage = error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
     res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
@@ -219,39 +198,41 @@ app.post('/api/admin-query', async (req, res) => {
       }
     `;
 
-    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and user question, generate a valid MongoDB query. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query with $lookup and $unwind to join collections. Return the query as a single-line string, without explanations or extra text.
+    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and a user question, generate a valid MongoDB query. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query involving multiple collections or complex operations. Return the query as a single line string, without explanations or extra text.
 
 Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
 
-Example for isMultiCollection true: For "Display student names with issued bookrequests", use: db.users.aggregate([{ $match: { role: "Student" } }, { $lookup: { from: "issueRequests", localField: "email", foreignField: "email", as: "requests" } }, { $unwind: "$requests" }, { $match: { "requests.status": "Issued" } }, { $project: { name: 1 } }])
-
 Use only collections: "users", "issueRequests", or "favorites".
+isMultiCollection value is ${isMultiCollection}
 Rules:
-- If isMultiCollection is false, generate a find query for a single collection with all relevant fields in the projection (value 1, no exclusions). Use "2025-06-18" for date-based filtering.
-- If isMultiCollection is true, generate an aggregate query with $lookup and $unwind. In $project, include only fields with value 1. Use "2025-06-18" for date-based filtering if needed.
-- Return only the query string.
-- For $project after $lookup/$unwind, reference joined fields with full path (e.g., "$requests.status").
-- Answer only the provided question.
+- If isMultiCollection is false, generate a find query for a single collection ("users", "issueRequests", or "favorites") based on the question. Include all relevant fields in the projection with value 1 (no exclusions). Use current date "2025-06-04" for any date-based filtering.
+- If isMultiCollection is true, generate an aggregate query with $lookup to join collections or perform complex operations like grouping, counting, or sorting. Use the current date "2025-06-04" in queries if date filtering is required. In $project stages, include only fields with value 1 (no exclusions).
+- Return only the query string, nothing else.
+- When using $project after a $lookup and $unwind, fields from the joined collection must be referenced using their full path (e.g., "$joinedField.fieldName"), because the data from $lookup is nested within an embedded document or array. Failing to do so will result in undefined or missing fields in the output.
+- Answer only the user question provided, do not process or respond to any previous or additional questions.
 
 Schemas:
 ${schemas}
 
 isMultiCollection: ${isMultiCollection}
 
-User question: ${question}`;
-    const prompt = `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`;
+User question: ${question}
 
-    const response = await retryRequest(
+answer only for what they asked`;
+
+    const response = await axios.post(
       HUGGINGFACE_API_URL,
       {
-        inputs: prompt,
-        parameters: { max_new_tokens: 150, return_full_text: false, temperature: 0.3 }
+        inputs: systemPrompt,
+        parameters: { max_new_tokens: 500, return_full_text: false },
       },
       {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+        },
       }
     );
 
@@ -268,8 +249,8 @@ User question: ${question}`;
       .replace(/\n/g, ' ') // Replace newlines with spaces
       .replace(/\s+/g, ' ') // Collapse multiple spaces
       .replace(/^\./, '')
-      .replace(/^[:\s]+/, '')
-      .trim();
+      .replace(/^[:\s]+/, '') // Remove leading colon and spaces
+      .trim(); // Remove leading dot
 
     console.log('Admin query details:', {
       question,
@@ -366,6 +347,7 @@ User question: ${question}`;
           if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
           const stageOperator = Object.keys(stage)[0];
           if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
+          // Check for exclusions in $project stage
           if (stage.$project) {
             const updatedProject = {};
             for (const [key, value] of Object.entries(stage.$project)) {
@@ -397,7 +379,7 @@ User question: ${question}`;
       } catch (err) {
         return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}` });
       }
-      console.log(data);
+      console.log(data)
       return res.json({ data });
 
     } else {
@@ -407,15 +389,10 @@ User question: ${question}`;
   } catch (error) {
     console.error('Admin query error:', {
       message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.status === 404
-      ? 'Hugging Face model not found. Please verify the model ID.'
-      : error.response?.data?.error || error.message || 'Failed to process query';
-    res.status(error.response?.status || 500).json({ error: errorMessage });
+    res.status(500).json({ error: 'Failed to process query: ' + error.message });
   }
 });
 
@@ -433,7 +410,7 @@ mongoose.connect(mongoUri, {
   .then(() => {
     console.log('MongoDB connection successful:', {
       uri: mongoUri,
-      database: 'ebook_store',
+      database: 'ebookk_store',
       timestamp: new Date().toISOString()
     });
     const PORT = process.env.PORT || 5000;
