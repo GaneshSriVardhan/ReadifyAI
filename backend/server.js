@@ -1,9 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const axios = require('axios');
 const cors = require('cors');
 const mongodbQueryParser = require('mongodb-query-parser').default;
+const { Transformer } = require('mistral_inference');
+const { MistralTokenizer } = require('mistral_common/tokens/tokenizers/mistral');
+const { ChatCompletionRequest, UserMessage } = require('mistral_common/protocol/instruct/messages');
+const { generate } = require('mistral_inference/generate');
+const { Tool, Function } = require('mistral_common/protocol/instruct/tool_calls');
+const path = require('path');
 
 const userRoutes = require('./routes/userRoutes');
 const issueRequestsRoutes = require('./routes/issueRequestsRoutes');
@@ -21,27 +26,35 @@ app.use('/api/users', userRoutes);
 app.use('/api/issueRequests', issueRequestsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 
+// Initialize Mistral model and tokenizer
+const mistralModelsPath = path.join(process.env.HOME || process.env.USERPROFILE, 'mistral_models', '7B-Instruct-v0.3');
+const tokenizer = MistralTokenizer.from_file(`${mistralModelsPath}/tokenizer.model.v3`);
+const model = Transformer.from_folder(mistralModelsPath);
+
 // Basic route to confirm server is running
 app.get('/', (req, res) => {
   res.json({ message: 'Server is running' });
 });
 
-// Hugging Face API settings
-const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3';
-
 // Tool definition for book context
-const TOOLS = [{
-  name: 'fetch_book_context',
-  description: 'Fetches context or metadata for a book using the Open Library API.',
-  parameters: {
-    title: {
-      description: 'The title of the book to fetch context for.',
-      type: 'str',
-      default: ''
-    }
-  }
-}];
+const TOOLS = [
+  new Tool({
+    function: new Function({
+      name: 'fetch_book_context',
+      description: 'Fetches context or metadata for a book using the Open Library API.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'The title of the book to fetch context for.',
+          }
+        },
+        required: ['title']
+      }
+    })
+  })
+];
 
 // Fetch book context from Open Library
 async function fetchBookContext(title) {
@@ -77,43 +90,32 @@ app.post('/api/ask', async (req, res) => {
       return res.status(400).json({ error: 'bookTitle and question are required' });
     }
 
-    if (!HUGGINGFACE_API_KEY) {
-      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
-    }
-
     const bookContext = await fetchBookContext(bookTitle);
-    const systemPrompt = `You are a helpful assistant with tools. <|tool|>${JSON.stringify(TOOLS)}</tool|> Use the provided tool to gather information about the book before answering.`;
-    const prompt = `${systemPrompt}\nContext from tool: ${bookContext}\nUser question: ${question}`;
+    const completionRequest = new ChatCompletionRequest({
+      tools: TOOLS,
+      messages: [
+        new UserMessage({
+          content: `You are a helpful assistant with tools. Use the provided tool to gather information about the book before answering.\nContext from tool: ${bookContext}\nUser question: ${question}`
+        })
+      ]
+    });
 
-    const response = await axios.post(
-      HUGGINGFACE_API_URL,
-      {
-        inputs: prompt,
-        parameters: { max_new_tokens: 500, return_full_text: false },
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
-        },
-      }
-    );
+    const tokens = tokenizer.encode_chat_completion(completionRequest).tokens;
+    const [outTokens] = await generate([tokens], model, {
+      max_tokens: 500,
+      temperature: 0.0,
+      eos_id: tokenizer.instruct_tokenizer.tokenizer.eos_id
+    });
+    const answer = tokenizer.instruct_tokenizer.tokenizer.decode(outTokens);
 
-    if (!response.data || !response.data[0]?.generated_text) {
-      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
-    }
-
-    res.json({ answer: response.data[0].generated_text });
+    res.json({ answer });
   } catch (error) {
     console.error('Proxy error:', {
       message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
-    res.status(error.response?.status || 500).json({ error: errorMessage });
+    res.status(500).json({ error: 'Failed to process request: ' + error.message });
   }
 });
 
@@ -124,10 +126,6 @@ app.post('/api/admin-query', async (req, res) => {
 
     if (!question || typeof question !== 'string' || question.trim() === '') {
       return res.status(400).json({ error: 'Question is required and must be a non-empty string' });
-    }
-
-    if (!HUGGINGFACE_API_KEY) {
-      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
     }
 
     // Detect referenced collections
@@ -222,25 +220,21 @@ User question: ${question}
 
 answer only for what they asked`;
 
-    const response = await axios.post(
-      HUGGINGFACE_API_URL,
-      {
-        inputs: systemPrompt,
-        parameters: { max_new_tokens: 500, return_full_text: false },
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
-        },
-      }
-    );
+    const completionRequest = new ChatCompletionRequest({
+      messages: [
+        new UserMessage({
+          content: systemPrompt
+        })
+      ]
+    });
 
-    if (!response.data || !response.data[0]?.generated_text) {
-      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
-    }
-
-    let generatedQuery = response.data[0].generated_text.trim();
+    const tokens = tokenizer.encode_chat_completion(completionRequest).tokens;
+    const [outTokens] = await generate([tokens], model, {
+      max_tokens: 500,
+      temperature: 0.0,
+      eos_id: tokenizer.instruct_tokenizer.tokenizer.eos_id
+    });
+    let generatedQuery = tokenizer.instruct_tokenizer.tokenizer.decode(outTokens).trim();
 
     // Clean up output
     generatedQuery = generatedQuery
@@ -379,7 +373,6 @@ answer only for what they asked`;
       } catch (err) {
         return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}` });
       }
-      console.log(data)
       return res.json({ data });
 
     } else {
@@ -410,7 +403,7 @@ mongoose.connect(mongoUri, {
   .then(() => {
     console.log('MongoDB connection successful:', {
       uri: mongoUri,
-      database: 'ebookk_store',
+      database: 'ebook_store',
       timestamp: new Date().toISOString()
     });
     const PORT = process.env.PORT || 5000;
