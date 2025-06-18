@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
 
 // Hugging Face API settings
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/HuggingFaceTB/SmolLM-1.7B-Instruct';
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/HuggingFaceTB/SmolLM2-1.7B-Instruct';
 
 // Retry logic for rate limit and transient errors
 const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
@@ -225,6 +225,7 @@ Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
 
+Example for isMultiCollection true: For "Display student names with issued bookrequests", use: db.users.aggregate([{ $match: { role: "Student" } }, { $lookup: { from: "issueRequests", localField: "email", foreignField: "email", as: "requests" } }, { $unwind: "$requests" }, { $match: { "requests.status": "Issued" } }, { $project: { name: 1 } }])
 
 Use only collections: "users", "issueRequests", or "favorites".
 Rules:
@@ -240,11 +241,12 @@ ${schemas}
 isMultiCollection: ${isMultiCollection}
 
 User question: ${question}`;
+    const prompt = `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`;
 
     const response = await retryRequest(
       HUGGINGFACE_API_URL,
       {
-        inputs: `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`,
+        inputs: prompt,
         parameters: { max_new_tokens: 150, return_full_text: false, temperature: 0.3 }
       },
       {
