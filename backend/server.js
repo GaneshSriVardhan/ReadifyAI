@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
 
 // Hugging Face API settings
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/HuggingFaceTB/SmolLM-1.7B-Instruct';
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/Chirayu/phi-2-mongodb';
 
 // Tool definition for book context
 const TOOLS = [{
