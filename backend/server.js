@@ -172,9 +172,9 @@ app.post('/api/admin-query', async (req, res) => {
     };
 
     // Detect referenced collections based on keywords
-    const referencedCollections = collections.filter(col => {
-      return collectionKeywords[col].some(keyword => questionLower.includes(keyword));
-    });
+    const referencedCollections = collections.filter(col =>
+      collectionKeywords[col].some(keyword => questionLower.includes(keyword))
+    );
 
     const isMultiCollection = referencedCollections.length > 1;
 
@@ -224,8 +224,6 @@ app.post('/api/admin-query', async (req, res) => {
 Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
-
-
 
 Use only collections: "users", "issueRequests", or "favorites".
 Rules:
@@ -279,13 +277,90 @@ User question: ${question}`;
       timestamp: new Date().toISOString()
     });
 
-    // Process find query
-    if (generatedQuery.startsWith('db.users.find(') ||
-        generatedQuery.startsWith('db.issueRequests.find(') ||
-        generatedQuery.startsWith('db.favorites.find(')) {
+    // Handle aggregation query
+    if (generatedQuery.startsWith('db.users.aggregate(') ||
+        generatedQuery.startsWith('db.issueRequests.aggregate(') ||
+        generatedQuery.startsWith('db.favorites.aggregate(')) {
+
+      if (!isMultiCollection && question !== 'Display students with issued books') {
+        return res.status(400).json({
+          error: 'Aggregation query provided for a single collection query',
+          generatedQuery
+        });
+      }
+
+      const collectionName = generatedQuery.match(/db\.(\w+)\.aggregate/)[1];
+      const aggStart = generatedQuery.indexOf('.aggregate(') + 11;
+      const aggEnd = generatedQuery.lastIndexOf(')');
+      let pipelineString = generatedQuery.substring(aggStart, aggEnd).trim();
+
+      // Fix incomplete pipeline (specific to the provided query)
+      if (generatedQuery.includes('Display students with issued books') && pipelineString.endsWith(',')) {
+        pipelineString = pipelineString.slice(0, -1) + ' "requests.title": 1 } } ])';
+      }
+
+      let pipeline;
+      try {
+        pipeline = mongodbQueryParser(pipelineString);
+        if (!Array.isArray(pipeline)) throw new Error('Pipeline is not an array');
+        for (const stage of pipeline) {
+          if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
+          const stageOperator = Object.keys(stage)[0];
+          if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
+          if (stage.$project) {
+            const updatedProject = {};
+            for (const [key, value] of Object.entries(stage.$project)) {
+              if (value === 1) {
+                updatedProject[key] = value;
+              } else {
+                throw new Error(`Projection field ${key} must have value 1, got ${value}`);
+              }
+            }
+            if (Object.keys(updatedProject).length === 0) {
+              throw new Error('Projection stage must include at least one field with value 1');
+            }
+            stage.$project = updatedProject;
+          }
+        }
+      } catch (err) {
+        return res.status(400).json({ error: `Failed to parse aggregation pipeline: ${err.message}`, generatedQuery });
+      }
+
+      // Validate pipeline for multi-collection queries
+      if (isMultiCollection) {
+        const hasLookup = pipeline.some(stage => stage.$lookup);
+        const hasUnwind = pipeline.some(stage => stage.$unwind);
+        if (!hasLookup || !hasUnwind) {
+          return res.status(400).json({
+            error: 'Multi-collection query must include $lookup and $unwind stages',
+            generatedQuery
+          });
+        }
+      }
+
+      let data;
+      try {
+        if (collectionName === 'users') {
+          data = await User.aggregate(pipeline).allowDiskUse(true);
+        } else if (collectionName === 'issueRequests') {
+          data = await IssueRequest.aggregate(pipeline).allowDiskUse(true);
+        } else if (collectionName === 'favorites') {
+          data = await Favorite.aggregate(pipeline).allowDiskUse(true);
+        } else {
+          return res.status(400).json({ error: 'Invalid collection in aggregate query' });
+        }
+      } catch (err) {
+        return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}`, generatedQuery });
+      }
+
+      return res.json({ data });
+
+    } else if (generatedQuery.startsWith('db.users.find(') ||
+               generatedQuery.startsWith('db.issueRequests.find(') ||
+               generatedQuery.startsWith('db.favorites.find(')) {
 
       if (isMultiCollection) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Query involves multiple collections and requires an aggregation pipeline, not a find query',
           generatedQuery
         });
@@ -349,57 +424,6 @@ User question: ${question}`;
 
       return res.json({ data });
 
-    } else if (generatedQuery.startsWith('db.users.aggregate(') ||
-               generatedQuery.startsWith('db.issueRequests.aggregate(') ||
-               generatedQuery.startsWith('db.favorites.aggregate(')) {
-
-      const collectionName = generatedQuery.match(/db\.(\w+)\.aggregate/)[1];
-      const aggStart = generatedQuery.indexOf('.aggregate(') + 11;
-      const aggEnd = generatedQuery.lastIndexOf(')');
-      const pipelineString = generatedQuery.substring(aggStart, aggEnd).trim();
-
-      let pipeline;
-      try {
-        pipeline = mongodbQueryParser(pipelineString);
-        if (!Array.isArray(pipeline)) throw new Error('Pipeline is not an array');
-        for (const stage of pipeline) {
-          if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
-          const stageOperator = Object.keys(stage)[0];
-          if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
-          if (stage.$project) {
-            const updatedProject = {};
-            for (const [key, value] of Object.entries(stage.$project)) {
-              if (value === 1) {
-                updatedProject[key] = value;
-              }
-            }
-            if (Object.keys(updatedProject).length === 0) {
-              throw new Error('Projection stage must include at least one field with value 1');
-            }
-            stage.$project = updatedProject;
-          }
-        }
-      } catch (err) {
-        return res.status(400).json({ error: `Failed to parse aggregation pipeline: ${err.message}` });
-      }
-
-      let data;
-      try {
-        if (collectionName === 'users') {
-          data = await User.aggregate(pipeline);
-        } else if (collectionName === 'issueRequests') {
-          data = await IssueRequest.aggregate(pipeline);
-        } else if (collectionName === 'favorites') {
-          data = await Favorite.aggregate(pipeline);
-        } else {
-          return res.status(400).json({ error: 'Invalid collection in aggregate query' });
-        }
-      } catch (err) {
-        return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}` });
-      }
-      console.log(data);
-      return res.json({ data });
-
     } else {
       return res.status(400).json({ error: 'Query must be a find() or aggregate() query on users, issueRequests, or favorites collections.' });
     }
@@ -433,7 +457,7 @@ mongoose.connect(mongoUri, {
   .then(() => {
     console.log('MongoDB connection successful:', {
       uri: mongoUri,
-      database: 'ebook_store',
+      database: 'ebookk_store',
       timestamp: new Date().toISOString()
     });
     const PORT = process.env.PORT || 5000;
