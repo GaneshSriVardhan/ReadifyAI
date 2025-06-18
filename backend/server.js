@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
 
 // Hugging Face API settings
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/HuggingFaceTB/SmolLM2-1.7B-Instruct';
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/meta-llama/Llama-3.2-1B-Instruct';
 
 // Retry logic for rate limit and transient errors
 const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
