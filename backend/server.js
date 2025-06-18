@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
 
 // Hugging Face API settings
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/Chirayu/phi-2-mongodb';
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/HuggingFaceTB/SmolLM-1.7B-Instruct';
 
 // Retry logic for rate limit and transient errors
 const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
@@ -99,14 +99,18 @@ app.post('/api/ask', async (req, res) => {
     }
 
     const bookContext = await fetchBookContext(bookTitle);
-    const systemPrompt = `You are a helpful assistant with tools. <|tool|>${JSON.stringify(TOOLS)}</tool|> Use the provided tool to gather information about the book before answering.`;
-    const prompt = `${systemPrompt}\nContext from tool: ${bookContext}\nUser question: ${question}`;
+    const systemPrompt = `You are a helpful assistant with access to book metadata. Use the provided context to answer the user's question about the book. Return only the answer, without explanations or extra text.
+
+Context: ${bookContext}
+
+User question: ${question}`;
+    const prompt = `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`;
 
     const response = await retryRequest(
       HUGGINGFACE_API_URL,
       {
         inputs: prompt,
-        parameters: { max_new_tokens: 500, return_full_text: false, temperature: 0.3 }
+        parameters: { max_new_tokens: 200, return_full_text: false, temperature: 0.3 }
       },
       {
         'Content-Type': 'application/json',
@@ -118,7 +122,7 @@ app.post('/api/ask', async (req, res) => {
       return res.status(500).json({ error: 'No valid response from Hugging Face API' });
     }
 
-    res.json({ answer: response.data[0].generated_text });
+    res.json({ answer: response.data[0].generated_text.trim() });
   } catch (error) {
     console.error('Proxy error:', {
       message: error.message,
@@ -127,7 +131,9 @@ app.post('/api/ask', async (req, res) => {
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
+    const errorMessage = error.response?.status === 404
+      ? 'Hugging Face model not found. Please verify the model ID.'
+      : error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
     res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
@@ -219,12 +225,11 @@ Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
 
-Example for isMultiCollection true: For "Display student names with issued bookrequests", use: db.users.aggregate([{ $match: { role: "Student" } }, { $lookup: { from: "issueRequests", localField: "email", foreignField: "email", as: "requests" } }, { $unwind: "$requests" }, { $match: { "requests.status": "Issued" } }, { $project: { name: 1 } }])
 
 Use only collections: "users", "issueRequests", or "favorites".
 Rules:
-- If isMultiCollection is false, generate a find query for a single collection with all relevant fields in the projection (value 1, no exclusions). Use "2025-06-04" for date-based filtering.
-- If isMultiCollection is true, generate an aggregate query with $lookup and $unwind. In $project, include only fields with value 1. Use "2025-06-04" for date-based filtering if needed.
+- If isMultiCollection is false, generate a find query for a single collection with all relevant fields in the projection (value 1, no exclusions). Use "2025-06-18" for date-based filtering.
+- If isMultiCollection is true, generate an aggregate query with $lookup and $unwind. In $project, include only fields with value 1. Use "2025-06-18" for date-based filtering if needed.
 - Return only the query string.
 - For $project after $lookup/$unwind, reference joined fields with full path (e.g., "$requests.status").
 - Answer only the provided question.
@@ -239,7 +244,7 @@ User question: ${question}`;
     const response = await retryRequest(
       HUGGINGFACE_API_URL,
       {
-        inputs: systemPrompt,
+        inputs: `<|begin_of_text|>System: ${systemPrompt}<|end_of_text|>`,
         parameters: { max_new_tokens: 150, return_full_text: false, temperature: 0.3 }
       },
       {
@@ -405,7 +410,9 @@ User question: ${question}`;
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.data?.error || error.message || 'Failed to process query';
+    const errorMessage = error.response?.status === 404
+      ? 'Hugging Face model not found. Please verify the model ID.'
+      : error.response?.data?.error || error.message || 'Failed to process query';
     res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
