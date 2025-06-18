@@ -1,14 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
+const axios = require('axios');
 const cors = require('cors');
 const mongodbQueryParser = require('mongodb-query-parser').default;
-const { Transformer } = require('mistral_inference');
-const { MistralTokenizer } = require('mistral_common/tokens/tokenizers/mistral');
-const { ChatCompletionRequest, UserMessage } = require('mistral_common/protocol/instruct/messages');
-const { generate } = require('mistral_inference/generate');
-const { Tool, Function } = require('mistral_common/protocol/instruct/tool_calls');
-const path = require('path');
 
 const userRoutes = require('./routes/userRoutes');
 const issueRequestsRoutes = require('./routes/issueRequestsRoutes');
@@ -26,35 +21,44 @@ app.use('/api/users', userRoutes);
 app.use('/api/issueRequests', issueRequestsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 
-// Initialize Mistral model and tokenizer
-const mistralModelsPath = path.join(process.env.HOME || process.env.USERPROFILE, 'mistral_models', '7B-Instruct-v0.3');
-const tokenizer = MistralTokenizer.from_file(`${mistralModelsPath}/tokenizer.model.v3`);
-const model = Transformer.from_folder(mistralModelsPath);
-
 // Basic route to confirm server is running
 app.get('/', (req, res) => {
   res.json({ message: 'Server is running' });
 });
 
-// Tool definition for book context
-const TOOLS = [
-  new Tool({
-    function: new Function({
-      name: 'fetch_book_context',
-      description: 'Fetches context or metadata for a book using the Open Library API.',
-      parameters: {
-        type: 'object',
-        properties: {
-          title: {
-            type: 'string',
-            description: 'The title of the book to fetch context for.',
-          }
-        },
-        required: ['title']
+// Hugging Face API settings
+const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1';
+
+// Retry logic for rate limit and transient errors
+const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await axios.post(url, data, { headers });
+      return response;
+    } catch (error) {
+      if ([429, 503].includes(error.response?.status) && i < retries - 1) {
+        console.log(`Error ${error.response?.status} at ${url}, retrying in ${delay * Math.pow(2, i)}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+        continue;
       }
-    })
-  })
-];
+      throw error;
+    }
+  }
+};
+
+// Tool definition for book context
+const TOOLS = [{
+  name: 'fetch_book_context',
+  description: 'Fetches context or metadata for a book using the Open Library API.',
+  parameters: {
+    title: {
+      description: 'The title of the book to fetch context for.',
+      type: 'str',
+      default: ''
+    }
+  }
+}];
 
 // Fetch book context from Open Library
 async function fetchBookContext(title) {
@@ -90,32 +94,47 @@ app.post('/api/ask', async (req, res) => {
       return res.status(400).json({ error: 'bookTitle and question are required' });
     }
 
+    if (!HUGGINGFACE_API_KEY) {
+      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
+    }
+
     const bookContext = await fetchBookContext(bookTitle);
-    const completionRequest = new ChatCompletionRequest({
-      tools: TOOLS,
-      messages: [
-        new UserMessage({
-          content: `You are a helpful assistant with tools. Use the provided tool to gather information about the book before answering.\nContext from tool: ${bookContext}\nUser question: ${question}`
-        })
-      ]
-    });
+    const systemPrompt = `You are a helpful assistant with access to book metadata. Use the provided context to answer the user's question about the book. Return only the answer, without explanations or extra text.
 
-    const tokens = tokenizer.encode_chat_completion(completionRequest).tokens;
-    const [outTokens] = await generate([tokens], model, {
-      max_tokens: 500,
-      temperature: 0.0,
-      eos_id: tokenizer.instruct_tokenizer.tokenizer.eos_id
-    });
-    const answer = tokenizer.instruct_tokenizer.tokenizer.decode(outTokens);
+Context: ${bookContext}
 
-    res.json({ answer });
+User question: ${question}`;
+    const prompt = `<|begin|>System: ${systemPrompt} User: ${question} Assistant: `;
+
+    const response = await retryRequest(
+      HUGGINGFACE_API_URL,
+      {
+        inputs: prompt,
+        parameters: { max_new_tokens: 200, return_full_text: false, temperature: 0.3 }
+      },
+      {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+      }
+    );
+
+    if (!response.data || !response.data[0]?.generated_text) {
+      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
+    }
+
+    res.json({ answer: response.data[0].generated_text.trim() });
   } catch (error) {
     console.error('Proxy error:', {
       message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    res.status(500).json({ error: 'Failed to process request: ' + error.message });
+    const errorMessage = error.response?.status === 404
+      ? 'Hugging Face model not found. Please verify the model ID.'
+      : error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
+    res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
 
@@ -126,6 +145,10 @@ app.post('/api/admin-query', async (req, res) => {
 
     if (!question || typeof question !== 'string' || question.trim() === '') {
       return res.status(400).json({ error: 'Question is required and must be a non-empty string' });
+    }
+
+    if (!HUGGINGFACE_API_KEY) {
+      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
     }
 
     // Detect referenced collections
@@ -196,45 +219,47 @@ app.post('/api/admin-query', async (req, res) => {
       }
     `;
 
-    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and a user question, generate a valid MongoDB query. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query involving multiple collections or complex operations. Return the query as a single line string, without explanations or extra text.
+    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and user question, generate a valid MongoDB query. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query with $lookup and $unwind to join collections. Return the query as a single-line string, without explanations or extra text.
 
 Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
 
+
+
 Use only collections: "users", "issueRequests", or "favorites".
-isMultiCollection value is ${isMultiCollection}
 Rules:
-- If isMultiCollection is false, generate a find query for a single collection ("users", "issueRequests", or "favorites") based on the question. Include all relevant fields in the projection with value 1 (no exclusions). Use current date "2025-06-04" for any date-based filtering.
-- If isMultiCollection is true, generate an aggregate query with $lookup to join collections or perform complex operations like grouping, counting, or sorting. Use the current date "2025-06-04" in queries if date filtering is required. In $project stages, include only fields with value 1 (no exclusions).
-- Return only the query string, nothing else.
-- When using $project after a $lookup and $unwind, fields from the joined collection must be referenced using their full path (e.g., "$joinedField.fieldName"), because the data from $lookup is nested within an embedded document or array. Failing to do so will result in undefined or missing fields in the output.
-- Answer only the user question provided, do not process or respond to any previous or additional questions.
+- If isMultiCollection is false, generate a find query for a single collection with all relevant fields in the projection (value 1, no exclusions). Use "2025-06-18" for date-based filtering.
+- If isMultiCollection is true, generate an aggregate query with $lookup and $unwind. In $project, include only fields with value 1. Use "2025-06-18" for date-based filtering if needed.
+- Return only the query string.
+- For $project after $lookup/$unwind, reference joined fields with full path (e.g., "$requests.status").
+- Answer only the provided question.
 
 Schemas:
 ${schemas}
 
 isMultiCollection: ${isMultiCollection}
 
-User question: ${question}
+User question: ${question}`;
+    const prompt = `<|begin|>System: ${systemPrompt} User: ${question} Assistant: `;
 
-answer only for what they asked`;
+    const response = await retryRequest(
+      HUGGINGFACE_API_URL,
+      {
+        inputs: prompt,
+        parameters: { max_new_tokens: 150, return_full_text: false, temperature: 0.3 }
+      },
+      {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+      }
+    );
 
-    const completionRequest = new ChatCompletionRequest({
-      messages: [
-        new UserMessage({
-          content: systemPrompt
-        })
-      ]
-    });
+    if (!response.data || !response.data[0]?.generated_text) {
+      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
+    }
 
-    const tokens = tokenizer.encode_chat_completion(completionRequest).tokens;
-    const [outTokens] = await generate([tokens], model, {
-      max_tokens: 500,
-      temperature: 0.0,
-      eos_id: tokenizer.instruct_tokenizer.tokenizer.eos_id
-    });
-    let generatedQuery = tokenizer.instruct_tokenizer.tokenizer.decode(outTokens).trim();
+    let generatedQuery = response.data[0].generated_text.trim();
 
     // Clean up output
     generatedQuery = generatedQuery
@@ -243,8 +268,8 @@ answer only for what they asked`;
       .replace(/\n/g, ' ') // Replace newlines with spaces
       .replace(/\s+/g, ' ') // Collapse multiple spaces
       .replace(/^\./, '')
-      .replace(/^[:\s]+/, '') // Remove leading colon and spaces
-      .trim(); // Remove leading dot
+      .replace(/^[:\s]+/, '')
+      .trim();
 
     console.log('Admin query details:', {
       question,
@@ -341,7 +366,6 @@ answer only for what they asked`;
           if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
           const stageOperator = Object.keys(stage)[0];
           if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
-          // Check for exclusions in $project stage
           if (stage.$project) {
             const updatedProject = {};
             for (const [key, value] of Object.entries(stage.$project)) {
@@ -373,6 +397,7 @@ answer only for what they asked`;
       } catch (err) {
         return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}` });
       }
+      console.log(data);
       return res.json({ data });
 
     } else {
@@ -382,10 +407,15 @@ answer only for what they asked`;
   } catch (error) {
     console.error('Admin query error:', {
       message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    res.status(500).json({ error: 'Failed to process query: ' + error.message });
+    const errorMessage = error.response?.status === 404
+      ? 'Hugging Face model not found. Please verify the model ID.'
+      : error.response?.data?.error || error.message || 'Failed to process query';
+    res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
 
