@@ -26,36 +26,25 @@ app.get('/', (req, res) => {
   res.json({ message: 'Server is running' });
 });
 
-// Hugging Face API settings
-const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1';
-
-// Retry logic for rate limit and transient errors
-const retryRequest = async (url, data, headers, retries = 3, delay = 1000) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const response = await axios.post(url, data, { headers });
-      return response;
-    } catch (error) {
-      if ([429, 503].includes(error.response?.status) && i < retries - 1) {
-        console.log(`Error ${error.response?.status} at ${url}, retrying in ${delay * Math.pow(2, i)}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
-        continue;
-      }
-      throw error;
-    }
-  }
-};
+// Groq Cloud API settings
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 // Tool definition for book context
 const TOOLS = [{
-  name: 'fetch_book_context',
-  description: 'Fetches context or metadata for a book using the Open Library API.',
-  parameters: {
-    title: {
-      description: 'The title of the book to fetch context for.',
-      type: 'str',
-      default: ''
+  type: 'function',
+  function: {
+    name: 'fetch_book_context',
+    description: 'Fetches context or metadata for a book using the Open Library API.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'The title of the book to fetch context for.',
+        }
+      },
+      required: ['title']
     }
   }
 }];
@@ -86,7 +75,7 @@ async function fetchBookContext(title) {
   }
 }
 
-// Hugging Face API endpoint for book-related questions
+// Groq Cloud API endpoint for book-related questions
 app.post('/api/ask', async (req, res) => {
   try {
     const { bookTitle, question } = req.body;
@@ -94,35 +83,43 @@ app.post('/api/ask', async (req, res) => {
       return res.status(400).json({ error: 'bookTitle and question are required' });
     }
 
-    if (!HUGGINGFACE_API_KEY) {
-      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'Groq API key is not configured' });
     }
 
     const bookContext = await fetchBookContext(bookTitle);
-    const systemPrompt = `You are a helpful assistant with access to book metadata. Use the provided context to answer the user's question about the book. Return only the answer, without explanations or extra text.
-
-Context: ${bookContext}
-
-User question: ${question}`;
-    const prompt = `<|begin|>System: ${systemPrompt} User: ${question} Assistant: `;
-
-    const response = await retryRequest(
-      HUGGINGFACE_API_URL,
+    const systemPrompt = `You are a helpful assistant with tools. Use the provided tool to gather information about the book before answering.`;
+    
+    const response = await axios.post(
+      GROQ_API_URL,
       {
-        inputs: prompt,
-        parameters: { max_new_tokens: 200, return_full_text: false, temperature: 0.3 }
+        model: 'llama3-70b-8192',
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt
+          },
+          {
+            role: 'user',
+            content: `Context from tool: ${bookContext}\nUser question: ${question}`
+          }
+        ],
+        tools: TOOLS,
+        max_tokens: 500
       },
       {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GROQ_API_KEY}`,
+        },
       }
     );
 
-    if (!response.data || !response.data[0]?.generated_text) {
-      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
+    if (!response.data || !response.data.choices?.[0]?.message?.content) {
+      return res.status(500).json({ error: 'No valid response from Groq API' });
     }
 
-    res.json({ answer: response.data[0].generated_text.trim() });
+    res.json({ answer: response.data.choices[0].message.content });
   } catch (error) {
     console.error('Proxy error:', {
       message: error.message,
@@ -131,12 +128,23 @@ User question: ${question}`;
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.status === 404
-      ? 'Hugging Face model not found. Please verify the model ID.'
-      : error.response?.data?.error || error.message || 'Failed to fetch response from Hugging Face API';
+    const errorMessage = error.response?.data?.error || error.message || 'Failed to fetch response from Groq API';
     res.status(error.response?.status || 500).json({ error: errorMessage });
   }
 });
+
+// Dynamic schema fetcher
+async function getDynamicSchemas() {
+  const schemas = {
+    users: User.schema.obj,
+    issueRequests: IssueRequest.schema.obj,
+    favorites: Favorite.schema.obj
+  };
+  return JSON.stringify(schemas, (key, value) => {
+    if (key === 'type') return value.name; // Convert Mongoose types to strings
+    return value;
+  }, 2);
+}
 
 // Admin query endpoint for MongoDB queries
 app.post('/api/admin-query', async (req, res) => {
@@ -147,15 +155,14 @@ app.post('/api/admin-query', async (req, res) => {
       return res.status(400).json({ error: 'Question is required and must be a non-empty string' });
     }
 
-    if (!HUGGINGFACE_API_KEY) {
-      return res.status(500).json({ error: 'Hugging Face API key is not configured' });
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'Groq API key is not configured' });
     }
 
     // Detect referenced collections
     const collections = ['users', 'issueRequests', 'favorites'];
     const questionLower = question.toLowerCase();
 
-    // Define keywords for each collection based on their schema
     const collectionKeywords = {
       users: [
         'user', 'users', 'student', 'students', 'faculty', 'admin',
@@ -171,67 +178,27 @@ app.post('/api/admin-query', async (req, res) => {
       ]
     };
 
-    // Detect referenced collections based on keywords
-    const referencedCollections = collections.filter(col =>
-      collectionKeywords[col].some(keyword => questionLower.includes(keyword))
-    );
+    const referencedCollections = collections.filter(col => {
+      return collectionKeywords[col].some(keyword => questionLower.includes(keyword));
+    });
 
     const isMultiCollection = referencedCollections.length > 1;
 
-    const schemas = `
-      User Schema:
-      {
-        name: String, required: true
-        email: String, required: true, unique
-        role: String, enum ["Admin", "Student", "Faculty"], required: true
-        rollNumber: String, required if role is "Student"
-        password: String, required: true
-        verificationToken: String
-        isVerified: Boolean, default: false
-        booksCanRequest: Number, default: 3 for Students, min: 0
-        timestamps: true
-        collection: "users"
-      }
-
-      IssueRequest Schema:
-      {
-        bookId: String, required: true
-        title: String, required: true
-        email: String, required: true
-        role: String, enum ["Student", "Faculty"], required: true
-        status: String, enum ["Pending", "Issued", "Rejected", "Returned"], default: "Pending"
-        requestedAt: Date, default: Date.now
-        returnDate: Date, required if status is "Issued" and role is "Student"
-        finePerDay: Number, min: 0
-        reasonForRejection: String, required if status is "Rejected"
-        timestamps: true
-        collection: "issueRequests"
-      }
-
-      Favorite Schema:
-      {
-        bookId: String, required: true
-        title: String, required: true
-        email: String, required: true
-        role: String, enum ["Student", "Faculty", "Admin"], required: true
-        timestamps: true
-        collection: "favorites"
-      }
-    `;
-
-    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and user question, generate a valid MongoDB query. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query with $lookup and $unwind to join collections. Return the query as a single-line string, without explanations or extra text.
+    const schemas = await getDynamicSchemas();
+    const systemPrompt = `You are an expert MongoDB query generator for a library management system. Given the schemas and a user question, generate a valid MongoDB query as a single line string. When isMultiCollection is false, generate ONLY a find query for a single collection. When isMultiCollection is true, generate ONLY an aggregate query involving multiple collections or complex operations. Return only the query string, without explanations or extra text.
 
 Allowed formats:
 - db.collection_name.find(filter, projection)
 - db.collection_name.aggregate(pipeline_array)
 
 Use only collections: "users", "issueRequests", or "favorites".
+isMultiCollection value is ${isMultiCollection}
 Rules:
-- If isMultiCollection is false, generate a find query for a single collection with all relevant fields in the projection (value 1, no exclusions). Use "2025-06-18" for date-based filtering.
-- If isMultiCollection is true, generate an aggregate query with $lookup and $unwind. In $project, include only fields with value 1. Use "2025-06-18" for date-based filtering if needed.
-- Return only the query string.
-- For $project after $lookup/$unwind, reference joined fields with full path (e.g., "$requests.status").
-- Answer only the provided question.
+- If isMultiCollection is false, generate a find query for a single collection ("users", "issueRequests", or "favorites") based on the question. Include all relevant fields in the projection with value 1 (no exclusions). Use current date "2025-07-19" for any date-based filtering.
+- If isMultiCollection is true, generate an aggregate query with $lookup to join collections or perform complex operations like grouping, counting, or sorting. Use the current date "2025-07-19" in queries if date filtering is required. In $project stages, allow computed fields (e.g., "$joinedField.fieldName") or fields with value 1, and allow "_id: 0" to exclude the _id field, but exclude any other fields with value 0.
+- Return only the query string, nothing else.
+- When using $project after a $lookup and $unwind, fields from joined collections must be referenced using their full path (e.g., "$joinedField.fieldName").
+- Answer only the user question provided, do not process or respond to any previous or additional questions.
 
 Schemas:
 ${schemas}
@@ -239,25 +206,32 @@ ${schemas}
 isMultiCollection: ${isMultiCollection}
 
 User question: ${question}`;
-    const prompt = `<|begin|>System: ${systemPrompt} User: ${question} Assistant: `;
 
-    const response = await retryRequest(
-      HUGGINGFACE_API_URL,
+    const response = await axios.post(
+      GROQ_API_URL,
       {
-        inputs: prompt,
-        parameters: { max_new_tokens: 150, return_full_text: false, temperature: 0.3 }
+        model: 'llama3-70b-8192',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: question }
+        ],
+        max_tokens: 500
       },
       {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GROQ_API_KEY}`,
+        },
       }
-    );
+    ).catch(error => {
+      throw new Error(`Groq API request failed: ${error.response?.status} - ${JSON.stringify(error.response?.data)}`);
+    });
 
-    if (!response.data || !response.data[0]?.generated_text) {
-      return res.status(500).json({ error: 'No valid response from Hugging Face API' });
+    if (!response.data || !response.data.choices?.[0]?.message?.content) {
+      return res.status(500).json({ error: 'No valid response from Groq API' });
     }
 
-    let generatedQuery = response.data[0].generated_text.trim();
+    let generatedQuery = response.data.choices[0].message.content.trim();
 
     // Clean up output
     generatedQuery = generatedQuery
@@ -266,7 +240,7 @@ User question: ${question}`;
       .replace(/\n/g, ' ') // Replace newlines with spaces
       .replace(/\s+/g, ' ') // Collapse multiple spaces
       .replace(/^\./, '')
-      .replace(/^[:\s]+/, '')
+      .replace(/^[:\s]+/, '') // Remove leading colon and spaces
       .trim();
 
     console.log('Admin query details:', {
@@ -277,90 +251,13 @@ User question: ${question}`;
       timestamp: new Date().toISOString()
     });
 
-    // Handle aggregation query
-    if (generatedQuery.startsWith('db.users.aggregate(') ||
-        generatedQuery.startsWith('db.issueRequests.aggregate(') ||
-        generatedQuery.startsWith('db.favorites.aggregate(')) {
-
-      if (!isMultiCollection && question !== 'Display students with issued books') {
-        return res.status(400).json({
-          error: 'Aggregation query provided for a single collection query',
-          generatedQuery
-        });
-      }
-
-      const collectionName = generatedQuery.match(/db\.(\w+)\.aggregate/)[1];
-      const aggStart = generatedQuery.indexOf('.aggregate(') + 11;
-      const aggEnd = generatedQuery.lastIndexOf(')');
-      let pipelineString = generatedQuery.substring(aggStart, aggEnd).trim();
-
-      // Fix incomplete pipeline (specific to the provided query)
-      if (generatedQuery.includes('Display students with issued books') && pipelineString.endsWith(',')) {
-        pipelineString = pipelineString.slice(0, -1) + ' "requests.title": 1 } } ])';
-      }
-
-      let pipeline;
-      try {
-        pipeline = mongodbQueryParser(pipelineString);
-        if (!Array.isArray(pipeline)) throw new Error('Pipeline is not an array');
-        for (const stage of pipeline) {
-          if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
-          const stageOperator = Object.keys(stage)[0];
-          if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
-          if (stage.$project) {
-            const updatedProject = {};
-            for (const [key, value] of Object.entries(stage.$project)) {
-              if (value === 1) {
-                updatedProject[key] = value;
-              } else {
-                throw new Error(`Projection field ${key} must have value 1, got ${value}`);
-              }
-            }
-            if (Object.keys(updatedProject).length === 0) {
-              throw new Error('Projection stage must include at least one field with value 1');
-            }
-            stage.$project = updatedProject;
-          }
-        }
-      } catch (err) {
-        return res.status(400).json({ error: `Failed to parse aggregation pipeline: ${err.message}`, generatedQuery });
-      }
-
-      // Validate pipeline for multi-collection queries
-      if (isMultiCollection) {
-        const hasLookup = pipeline.some(stage => stage.$lookup);
-        const hasUnwind = pipeline.some(stage => stage.$unwind);
-        if (!hasLookup || !hasUnwind) {
-          return res.status(400).json({
-            error: 'Multi-collection query must include $lookup and $unwind stages',
-            generatedQuery
-          });
-        }
-      }
-
-      let data;
-      try {
-        if (collectionName === 'users') {
-          data = await User.aggregate(pipeline).allowDiskUse(true);
-        } else if (collectionName === 'issueRequests') {
-          data = await IssueRequest.aggregate(pipeline).allowDiskUse(true);
-        } else if (collectionName === 'favorites') {
-          data = await Favorite.aggregate(pipeline).allowDiskUse(true);
-        } else {
-          return res.status(400).json({ error: 'Invalid collection in aggregate query' });
-        }
-      } catch (err) {
-        return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}`, generatedQuery });
-      }
-
-      return res.json({ data });
-
-    } else if (generatedQuery.startsWith('db.users.find(') ||
-               generatedQuery.startsWith('db.issueRequests.find(') ||
-               generatedQuery.startsWith('db.favorites.find(')) {
+    // Process find query
+    if (generatedQuery.startsWith('db.users.find(') ||
+        generatedQuery.startsWith('db.issueRequests.find(') ||
+        generatedQuery.startsWith('db.favorites.find(')) {
 
       if (isMultiCollection) {
-        return res.status(400).json({
+        return res.status(400).json({ 
           error: 'Query involves multiple collections and requires an aggregation pipeline, not a find query',
           generatedQuery
         });
@@ -394,11 +291,11 @@ User question: ${question}`;
       try {
         filter = mongodbQueryParser(filterString);
       } catch (err) {
-        return res.status(400).json({ error: 'Failed to parse filter: ' + err.message });
+        return res.status(400).json({ error: `Failed to parse filter: ${err.message}` });
       }
 
-      if (projectionString.includes(': 0')) {
-        return res.status(400).json({ error: 'Projection must only include fields with value 1 (no exclusions allowed)' });
+      if (projectionString.includes(': 0') && !projectionString.includes('_id: 0')) {
+        return res.status(400).json({ error: 'Projection must not include fields with value 0 except for _id' });
       }
       if (!projectionString.includes(': 1')) {
         return res.status(400).json({ error: 'Projection must include at least one field with value 1' });
@@ -424,6 +321,55 @@ User question: ${question}`;
 
       return res.json({ data });
 
+    } else if (generatedQuery.startsWith('db.users.aggregate(') ||
+               generatedQuery.startsWith('db.issueRequests.aggregate(') ||
+               generatedQuery.startsWith('db.favorites.aggregate(')) {
+
+      const collectionName = generatedQuery.match(/db\.(\w+)\.aggregate/)[1];
+      const aggStart = generatedQuery.indexOf('.aggregate(') + 11;
+      const aggEnd = generatedQuery.lastIndexOf(')');
+      const pipelineString = generatedQuery.substring(aggStart, aggEnd).trim();
+
+      let pipeline;
+      try {
+        pipeline = mongodbQueryParser(pipelineString);
+        if (!Array.isArray(pipeline)) throw new Error('Pipeline is not an array');
+        for (const stage of pipeline) {
+          if (!stage || typeof stage !== 'object') throw new Error('Invalid pipeline stage');
+          const stageOperator = Object.keys(stage)[0];
+          if (!stageOperator.startsWith('$')) throw new Error('Pipeline stage must start with $ operator');
+          if (stage.$project) {
+            // Allow _id: 0, but disallow other fields with value 0
+            const projectFields = Object.entries(stage.$project);
+            if (projectFields.some(([key, value]) => key !== '_id' && value === 0)) {
+              throw new Error('Projection stage must not include fields with value 0 except for _id');
+            }
+            if (projectFields.length === 0) {
+              throw new Error('Projection stage must include at least one field');
+            }
+            // Allow computed fields (e.g., "$user.name") or fields with value 1
+          }
+        }
+      } catch (err) {
+        return res.status(400).json({ error: `Failed to parse aggregation pipeline: ${err.message}` });
+      }
+
+      let data;
+      try {
+        if (collectionName === 'users') {
+          data = await User.aggregate(pipeline);
+        } else if (collectionName === 'issueRequests') {
+          data = await IssueRequest.aggregate(pipeline);
+        } else if (collectionName === 'favorites') {
+          data = await Favorite.aggregate(pipeline);
+        } else {
+          return res.status(400).json({ error: 'Invalid collection in aggregate query' });
+        }
+      } catch (err) {
+        return res.status(400).json({ error: `Aggregation query execution failed: ${err.message}` });
+      }
+      return res.json({ data });
+
     } else {
       return res.status(400).json({ error: 'Query must be a find() or aggregate() query on users, issueRequests, or favorites collections.' });
     }
@@ -431,15 +377,10 @@ User question: ${question}`;
   } catch (error) {
     console.error('Admin query error:', {
       message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    const errorMessage = error.response?.status === 404
-      ? 'Hugging Face model not found. Please verify the model ID.'
-      : error.response?.data?.error || error.message || 'Failed to process query';
-    res.status(error.response?.status || 500).json({ error: errorMessage });
+    res.status(500).json({ error: `Failed to process query: ${error.message}` });
   }
 });
 
@@ -457,7 +398,7 @@ mongoose.connect(mongoUri, {
   .then(() => {
     console.log('MongoDB connection successful:', {
       uri: mongoUri,
-      database: 'ebookk_store',
+      database: 'ebook_store',
       timestamp: new Date().toISOString()
     });
     const PORT = process.env.PORT || 5000;
