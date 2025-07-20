@@ -1,3 +1,4 @@
+## DEMO LINK: https://drive.google.com/file/d/16IbbpBgm4eJx4mufyXVENW8e1HCzhzQJ/view?usp=sharing
 # ReadifyAI: AI-Powered Role-Based E-Library Management System
 
 ReadifyAI is a full-stack e-library management system built with the MERN stack, enhanced by Generative AI and NLP for intelligent book search and management. It supports role-based access for Admins, Faculty, and Students, offering secure OTP-based authentication, real-time book issuance/return workflows, and a responsive UI styled with Tailwind CSS. The platform integrates MongoDB for data storage, Nodemailer for email notifications, and AI-driven features for natural language queries and semantic document retrieval.
